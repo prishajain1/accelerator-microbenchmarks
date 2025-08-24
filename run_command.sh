@@ -13,7 +13,7 @@ export WORKLOAD_NAME="prisha-tpu-mb-v5p-256" # Changed name slightly
 
 # Your GitHub username and branch with the changes
 export GITHUB_USER="prishajain1"
-export BRANCH_NAME="report-feature" # *** Use the branch you pushed to ***
+export BRANCH_NAME="report-generator-feature" # *** Use the branch you pushed to ***
 
 gcloud config set project ${PROJECT_ID}
 gcloud config set compute/zone ${ZONE}
