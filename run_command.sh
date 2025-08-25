@@ -31,8 +31,7 @@ export JSONL_FILE="${METRICS_DIR}/metrics_report.jsonl"
 export XLSX_FILE="${METRICS_DIR}/metrics_report.xlsx"
 
 # Command to be executed on the TPU VM
-COMMAND="rm -rf accelerator-microbenchmarks && \
-git clone -b ${BRANCH_NAME} https://github.com/${GITHUB_USER}/accelerator-microbenchmarks.git && \
+COMMAND="git clone -b ${BRANCH_NAME} https://github.com/${GITHUB_USER}/accelerator-microbenchmarks.git && \
 cd accelerator-microbenchmarks && \
 pip install -r requirements.txt && \
 mkdir -p ${METRICS_DIR} && \
