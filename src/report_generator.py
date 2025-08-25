@@ -1,119 +1,243 @@
-import json
+import argparse
 import os
-from collections import defaultdict
+import re
+import jsonlines
+import pandas as pd
+from google.cloud import storage
 from openpyxl import Workbook
-import logging
+from openpyxl.utils.dataframe import dataframe_to_rows
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
+from collections import defaultdict
+import tempfile
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+METRICS_TO_REPORT = [
+    "ici_bandwidth_gbyte_s_p50",
+    "ici_bandwidth_gbyte_s_p90",
+    "ici_bandwidth_gbyte_s_p95",
+    "ici_bandwidth_gbyte_s_p99",
+    "ici_bandwidth_gbyte_s_avg",
+]
 
-# Map ici_size to number of cores
-CORE_MAP = {
-    64: 128,  # ici_size 64 -> 128 cores
-    128: 256   # ici_size 128 -> 256 cores
-}
-# The fixed column headers for core counts in the report
-CORE_COLUMNS = sorted(CORE_MAP.values()) # Results in [128, 256]
+def get_num_chips(tpu_type: str) -> int:
+    """Extracts the number of chips from the TPU type string."""
+    match = re.search(r"-(\d+)$", tpu_type)
+    if match:
+        return int(match.group(1))
+    raise ValueError(f"Could not extract number of chips from TPU type: {tpu_type}")
 
-def generate_local_excel_report(jsonl_local_path, excel_local_path):
-    logging.info(f"Generating report from local file: {jsonl_local_path}")
-    try:
-        with open(jsonl_local_path, 'r') as f:
-            jsonl_content = f.read()
-    except FileNotFoundError:
-        logging.error(f"Local JSONL file not found: {jsonl_local_path}")
-        return
-    except Exception as e:
-        logging.error(f"Could not read local JSONL file: {e}")
-        return
+def download_blob(bucket_name, source_blob_name, destination_file_name):
+    """Downloads a blob from the bucket."""
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(source_blob_name)
+    blob.download_to_filename(destination_file_name)
+    # print(f"Blob {source_blob_name} downloaded to {destination_file_name}.")
 
-    data_by_test = defaultdict(list)
-    processed_ici_sizes = set()
+def upload_blob(bucket_name, source_file_name, destination_blob_name):
+    """Uploads a file to the bucket."""
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_filename(source_file_name)
+    print(f"File {source_file_name} uploaded to {destination_blob_name}.")
 
-    for line in jsonl_content.strip().split('\n'):
-        if not line: continue
+def list_blobs(bucket_name, prefix):
+    """Lists all the blobs in the bucket that start with the prefix."""
+    storage_client = storage.Client()
+    blobs = storage_client.list_blobs(bucket_name, prefix=prefix)
+    return [blob.name for blob in blobs]
+
+def parse_gcs_path(gcs_path):
+    """Parses GCS path into bucket name and prefix."""
+    if not gcs_path.startswith("gs://"):
+        raise ValueError("GCS path must start with gs://")
+    parts = gcs_path[5:].split("/", 1)
+    bucket_name = parts[0]
+    prefix = parts[1] if len(parts) > 1 else ""
+    return bucket_name, prefix
+
+def get_dimension_config(benchmark_name):
+    """
+    Returns the key to be used as the primary dimension for row labels
+    and a function to extract a sortable value from it.
+    """
+    # TODO: Customize this function based on the benchmarks
+    DIM_KEYS = ['m', 'n', 'dim', 'size', 'buffer_size', 'dimension']
+    # Default dimension key
+    return DIM_KEYS, lambda x: x
+
+def identify_dimension_column(df, potential_dim_keys):
+    """Identifies the column in the DataFrame that varies the most, likely the dimension."""
+    if df.empty:
+        return None
+
+    for key in potential_dim_keys:
+        if key in df.columns:
+             # Check if this column has more than one unique value
+            if df[key].nunique() > 1:
+                is_numeric = pd.api.types.is_numeric_dtype(df[key])
+                return key, is_numeric
+            # If only one unique value, it might still be the dimension if only one row exists
+            if df.shape[0] == 1:
+                is_numeric = pd.api.types.is_numeric_dtype(df[key])
+                return key, is_numeric
+
+    # Fallback or more complex inference
+    for col in df.columns:
+        if col not in METRICS_TO_REPORT and df[col].nunique() > 1:
+             is_numeric = pd.api.types.is_numeric_dtype(df[col])
+             return col, is_numeric
+    return None, False
+
+def format_sheet(sheet, num_chips):
+    """Applies formatting to the sheet."""
+    # Bold headers
+    bold_font = Font(bold=True)
+    center_alignment = Alignment(horizontal='center', vertical='center')
+
+    for i, metric in enumerate(METRICS_TO_REPORT):
+        col_start = 1 + i * 3
+        # Metric name header (A1, D1, G1, ...)
+        cell = sheet.cell(row=1, column=col_start)
+        cell.font = bold_font
+        cell.alignment = center_alignment
+        sheet.merge_cells(start_row=1, start_column=col_start, end_row=1, end_column=col_start + 1)
+
+        # Sub headers (A2, B2, D2, E2, ...)
+        cell = sheet.cell(row=2, column=col_start) # dimensions\TPUs
+        cell.font = bold_font
+        cell = sheet.cell(row=2, column=col_start + 1) # Num chips
+        cell.font = bold_font
+        cell.alignment = center_alignment
+
+    # Adjust column widths
+    for column_cells in sheet.columns:
         try:
-            record = json.loads(line)
-            if 'metrics' in record and 'dimensions' in record:
-                metrics = record['metrics']
-                dims = record['dimensions']
-                test_name = dims.get('test_name')
-                matrix_dim = dims.get('matrix_dim')
-                ici_size = dims.get('ici_size')
+            length = max(len(str(cell.value)) for cell in column_cells if cell.value is not None)
+            sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = length + 2
+        except ValueError:
+            pass
 
-                is_valid = metrics.get('ici_bandwidth_gbyte_s_avg') is not None
-                if test_name and matrix_dim is not None and ici_size is not None and is_valid:
-                    try:
-                        ici_size_val = int(ici_size)
-                        core_count = CORE_MAP.get(ici_size_val)
-                        if core_count:
-                            data_by_test[test_name].append({
-                                'matrix_dim': int(matrix_dim),
-                                'core_count': core_count, # Store the mapped core count
-                                'metrics': metrics
-                            })
-                            processed_ici_sizes.add(ici_size_val)
-                        else:
-                            logging.warning(f"Warning: Unexpected ici_size '{ici_size_val}' in data, not in CORE_MAP.")
-                    except ValueError:
-                         logging.warning(f"Warning: Could not convert matrix_dim '{matrix_dim}' or ici_size '{ici_size}' to int for test '{test_name}'. Skipping record.")
-                         continue
-        except json.JSONDecodeError:
-            logging.warning(f"Warning: Could not decode a line: {line}")
-            continue
 
-    if not data_by_test:
-        logging.info("No valid data found to generate report.")
+def generate_excel_report(gcs_run_dir: str, tpu_type: str):
+    """Generates the Excel report from JSONL files in GCS."""
+    bucket_name, run_prefix = parse_gcs_path(gcs_run_dir)
+    num_chips = get_num_chips(tpu_type)
+    xlml_prefix = os.path.join(run_prefix, "xlml/")
+
+    print(f"Scanning for .jsonl files in {bucket_name}/{xlml_prefix}")
+    blob_names = list_blobs(bucket_name, xlml_prefix)
+    jsonl_files = [b for b in blob_names if b.endswith(".jsonl")]
+
+    if not jsonl_files:
+        print("No .jsonl files found.")
+        return
+
+    benchmark_data = defaultdict(list)
+    temp_dir = tempfile.mkdtemp()
+
+    for file_blob in jsonl_files:
+        try:
+            # microbenchmark_all_gather_2024-08-26T18:20:59.215844+00:00Z.jsonl
+            file_name = os.path.basename(file_blob)
+            parts = file_name.split("_")
+            if len(parts) < 3: continue
+            benchmark_name = "_".join(parts[1:-1])
+
+            local_file = os.path.join(temp_dir, file_name)
+            download_blob(bucket_name, file_blob, local_file)
+
+            with jsonlines.open(local_file) as reader:
+                for obj in reader:
+                    flat_data = obj.get("metadata", {})
+                    flat_data.update(obj.get("metrics", {}))
+                    benchmark_data[benchmark_name].append(flat_data)
+        except Exception as e:
+            print(f"Error processing file {file_blob}: {e}")
+
+    if not benchmark_data:
+        print("No data parsed from jsonl files.")
         return
 
     wb = Workbook()
-    if "Sheet" in wb.sheetnames:
-        wb.remove(wb["Sheet"])
+    wb.remove(wb.active)  # Remove the default sheet
 
-    metrics_keys = [
-        "ici_bandwidth_gbyte_s_p50", "ici_bandwidth_gbyte_s_p90",
-        "ici_bandwidth_gbyte_s_p95", "ici_bandwidth_gbyte_s_p99",
-        "ici_bandwidth_gbyte_s_avg"
-    ]
+    for benchmark_name, data in benchmark_data.items():
+        print(f"Processing benchmark: {benchmark_name}")
+        sheet = wb.create_sheet(title=benchmark_name)
+        df = pd.DataFrame(data)
 
-    for test_name, records in data_by_test.items():
-        if not records: continue
+        if df.empty:
+            print(f"No data for {benchmark_name}")
+            continue
 
-        safe_test_name = "".join(c for c in test_name if c.isalnum() or c in (' ', '_')).rstrip()
-        safe_test_name = safe_test_name[:31]
-        ws = wb.create_sheet(title=safe_test_name)
+        potential_dim_keys, dim_extractor = get_dimension_config(benchmark_name)
+        dim_col, is_numeric = identify_dimension_column(df, potential_dim_keys)
 
-        matrix_dims = sorted(list(set(r['matrix_dim'] for r in records)))
+        if not dim_col:
+            print(f"Could not identify dimension column for {benchmark_name}")
+            continue
 
-        # Create a map for easy lookup: (matrix_dim, core_count) -> metrics_dict
-        data_map = {}
-        for record in records:
-            data_map[(record['matrix_dim'], record['core_count'])] = record['metrics']
+        print(f"Using '{dim_col}' as dimension column for {benchmark_name}")
 
-        current_col = 1
-        for metric in metrics_keys:
-            # Metric Header
-            ws.cell(row=1, column=current_col, value=metric)
+        # Sort by dimension column
+        if is_numeric:
+            df[dim_col] = pd.to_numeric(df[dim_col])
+        df = df.sort_values(by=dim_col)
 
-            # Sub Header - Always show both 128 and 256 core columns
-            ws.cell(row=2, column=current_col, value="dimensions\\TPUs")
-            ws.cell(row=2, column=current_col + 1, value=CORE_COLUMNS[0]) # 128
-            ws.cell(row=2, column=current_col + 2, value=CORE_COLUMNS[1]) # 256
+        dimensions = df[dim_col].tolist()
 
-            # Data Rows
-            for row_idx, dim in enumerate(matrix_dims):
-                ws.cell(row=3 + row_idx, column=current_col, value=dim)
-                for col_idx, core_count in enumerate(CORE_COLUMNS):
-                    cell_data = data_map.get((dim, core_count))
-                    metric_val = cell_data.get(metric) if cell_data else None
-                    ws.cell(row=3 + row_idx, column=current_col + 1 + col_idx, value=metric_val if metric_val is not None else "")
+        for i, metric in enumerate(METRICS_TO_REPORT):
+            if metric not in df.columns:
+                print(f"Metric {metric} not found in data for {benchmark_name}")
+                continue
 
-            # Move to the next block: 1 (dim col) + len(CORE_COLUMNS) (data cols) + 2 (spacer cols)
-            current_col += 1 + len(CORE_COLUMNS) + 2
+            col_start = 1 + i * 3
+            # Write headers
+            sheet.cell(row=1, column=col_start, value=metric)
+            sheet.cell(row=2, column=col_start, value=f"{dim_col}\\TPUs")
+            sheet.cell(row=2, column=col_start + 1, value=num_chips)
 
-    try:
-        os.makedirs(os.path.dirname(excel_local_path), exist_ok=True)
-        wb.save(excel_local_path)
-        logging.info(f"Excel report saved locally to {excel_local_path}")
-    except Exception as e:
-        logging.error(f"Failed to save Excel file {excel_local_path}: {e}")
+            # Write data
+            for row_idx, dim_val in enumerate(dimensions):
+                sheet.cell(row=row_idx + 3, column=col_start, value=dim_val)
+                metric_val = df.iloc[row_idx][metric]
+                sheet.cell(row=row_idx + 3, column=col_start + 1, value=metric_val)
 
+        format_sheet(sheet, num_chips)
+
+    # Save workbook to a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_excel:
+        wb.save(tmp_excel.name)
+        excel_file_path = tmp_excel.name
+
+    # Upload to GCS
+    excel_blob_name = os.path.join(run_prefix, "benchmark_report.xlsx")
+    upload_blob(bucket_name, excel_file_path, excel_blob_name)
+
+    # Clean up temp files
+    os.remove(excel_file_path)
+    for root, dirs, files in os.walk(temp_dir, topdown=False):
+        for name in files:
+            os.remove(os.path.join(root, name))
+        for name in dirs:
+            os.rmdir(os.path.join(root, name))
+    os.rmdir(temp_dir)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate Excel report from benchmark results in GCS.")
+    parser.add_argument(
+        "--gcs_run_dir",
+        type=str,
+        required=True,
+        help="GCS directory containing the run results (e.g., gs://bucket/path/to/run).",
+    )
+    parser.add_argument(
+        "--tpu_type",
+        type=str,
+        required=True,
+        help="TPU type used for the benchmark (e.g., v5p-256).",
+    )
+    args = parser.parse_args()
+    generate_excel_report(args.gcs_run_dir, args.tpu_type)

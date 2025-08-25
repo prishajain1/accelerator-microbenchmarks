@@ -1,11 +1,7 @@
 """This script runs microbenchmarks and collects metrics.
 
 Sample usage (on TPU vm):
-  $ python src/run_benchmark.py --config=configs/benchmark_collectives.yaml
-
-To generate a report locally:
-  $ python src/run_benchmark.py --config=configs/benchmark_collectives.yaml \
-    --generate_report
+  $ python run_benchmark.py --config=configs/benchmark_collectives.yaml
 """
 
 import argparse
@@ -24,11 +20,7 @@ import ray
 from concurrent.futures import ThreadPoolExecutor
 import os
 import copy
-import sys
-import shutil
 
-# Import the report generator script
-import report_generator
 
 COLLECTIVE_BENCHMARK_MAP = {
     "all_gather": "benchmark_collectives.all_gather_benchmark",
@@ -84,12 +76,8 @@ dtype_mapping = {
 
 # Always dump HLOs
 TMP_XLA_DUMP_DIR = "/tmp/microbenchmarks/hlo_graphs"
-# os.environ["XLA_FLAGS"] = f"--xla_dump_to={TMP_XLA_DUMP_DIR}"
+os.environ["XLA_FLAGS"] = f"--xla_dump_to={TMP_XLA_DUMP_DIR}"
 
-# Fixed local directory for collecting metrics for the report
-LOCAL_METRICS_OUTPUT_DIR = "/tmp/microbenchmarks/outputs"
-METRICS_REPORT_FILE = os.path.join(LOCAL_METRICS_OUTPUT_DIR, "metrics_report.jsonl")
-EXCEL_REPORT_FILE = os.path.join(LOCAL_METRICS_OUTPUT_DIR, "benchmark_report.xlsx")
 
 def get_benchmark_config(config_path: str) -> Dict[str, Any]:
     """Load benchmark configuration from a YAML file."""
@@ -132,7 +120,7 @@ def get_benchmark_functions(
 
 
 def preprocess_benchmark_param(
-    benchmark_param: Dict[str, Any], trace_dir: str = None
+    benchmark_param: Dict[str, Any], trace_dir: string = None
 ) -> Dict[str, Any]:
     """Preprocess the benchmark parameter before running the benchmark."""
     if "dtype" in benchmark_param:
@@ -142,6 +130,9 @@ def preprocess_benchmark_param(
         else:
             raise ValueError(f"Unsupported dtype: {dtype_str}")
 
+    # Handle "SAME_AS_" parameters.
+    # For example, if "n" is "SAME_AS_m", then "n" will
+    # be set to the same value as "m".
     for key, value in benchmark_param.items():
         if isinstance(value, str) and value.startswith("SAME_AS_"):
             same_as_key = value.split("SAME_AS_")[1]
@@ -164,13 +155,15 @@ def generate_benchmark_params_sweeping(
         param_sets = {}
         for key, value in sweep_params.items():
             if key.endswith("_range"):
-                key = key[:-6]
+                key = key[:-6]  # Remove the last 6 characters (i.e., '_range')
 
             if isinstance(value, dict):
+                # Extract the range and multiplier
                 start = value.get("start")
                 end = value.get("end")
                 multiplier = value.get("multiplier", None)
                 increase_by = value.get("increase_by", None)
+                # Generate values in the range
                 param_values = []
                 current_value = start
                 while current_value <= end:
@@ -180,39 +173,54 @@ def generate_benchmark_params_sweeping(
                     elif increase_by:
                         current_value += increase_by
                     else:
-                        raise ValueError("Must provide either multiplier or increase_by.")
+                        raise ValueError(
+                            "In sweep mode, user must provide either multiplier or"
+                            " increase_by value."
+                        )
+                # Add the generated values to the param set
                 param_sets[key] = param_values
             else:
+                # If it's not a range, just add it as a list with one element
                 param_sets[key] = [value]
 
+        # Get parameter names in a fixed order
         param_names = list(param_sets.keys())
+
+        # Generate all combinations using itertools.product
         combinations = [
             dict(zip(param_names, values))
             for values in itertools.product(*(param_sets[name] for name in param_names))
         ]
         generated_params += combinations
+
     return generated_params
 
 
 def write_to_csv(csv_path: str, calculate_metrics_results: List[Dict[str, Any]]):
     """Write the metrics results to a CSV file."""
     if not calculate_metrics_results:
-        print("Warning: 0 metrics results are collected to write to CSV.")
-        return
+        raise ValueError("0 metrics results are collected.")
     if not isinstance(calculate_metrics_results[0], dict):
         raise ValueError("metrics result is not a dict.")
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    # Open the CSV file for writing
     with open(csv_path, mode="w", newline="") as csv_file:
+        # Use the keys from the first item as the headers
+
         headers = calculate_metrics_results[0].keys()
+
+        # Initialize a DictWriter with the headers
         writer = csv.DictWriter(csv_file, fieldnames=headers)
-        writer.writeheader()
+        writer.writeheader()  # Write the header row
+
+        # Iterate through each result and write to the CSV
         for each in calculate_metrics_results:
-            writer.writerow(each)
+            writer.writerow(each)  # Write each row
     print(f"Metrics written to CSV at {csv_path}.")
 
 
-def run_single_benchmark(benchmark_config: Dict[str, Any], common_metrics_dir: str):
+def run_single_benchmark(benchmark_config: Dict[str, Any]):
     """Run a single benchmark with one or more configurations."""
+    # Extract benchmark details
     benchmark_name = benchmark_config.get("benchmark_name")
     benchmark_params = benchmark_config.get("benchmark_params", [])
     benchmark_sweep_params = benchmark_config.get("benchmark_sweep_params", {})
@@ -220,28 +228,42 @@ def run_single_benchmark(benchmark_config: Dict[str, Any], common_metrics_dir: s
         benchmark_params += generate_benchmark_params_sweeping(benchmark_sweep_params)
     csv_path = benchmark_config.get("csv_path")
     trace_dir = benchmark_config.get("trace_dir")
+    xlml_metrics_dir = benchmark_config.get("xlml_metrics_dir")
     xla_dump_dir = benchmark_config.get("xla_dump_dir")
 
     if not benchmark_name:
         raise ValueError("Each benchmark must have a 'benchmark_name'.")
 
+    # Get the benchmark function
     benchmark_func, calculate_metrics_func = get_benchmark_functions(benchmark_name)
+
     print(f"\n{'=' * 30}Starting benchmark '{benchmark_name}'{'=' * 30}\n")
 
+    # Run the benchmark
+    calculate_metrics_results = []
     for benchmark_param in benchmark_params:
         original_benchmark_param = copy.deepcopy(benchmark_param)
-        benchmark_param = preprocess_benchmark_param(benchmark_param, trace_dir=trace_dir)
+        benchmark_param = preprocess_benchmark_param(
+            benchmark_param, trace_dir=trace_dir
+        )
         print(f"Running benchmark: {benchmark_name} with params: {benchmark_param}")
-        test_start_time = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+        test_start_time = (
+            datetime.datetime.now(tz=datetime.timezone.utc).isoformat() + "Z"
+        )  # "Z" indicates UTC
         benchmark_results = benchmark_func(**benchmark_param)
-        test_end_time = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+        test_end_time = (
+            datetime.datetime.now(tz=datetime.timezone.utc).isoformat() + "Z"
+        )
 
+        # Filter benchmark_results to include only keys present in
+        # calculate_metrics_func
         calculate_metrics_params = inspect.signature(calculate_metrics_func).parameters
         filtered_benchmark_results = {
             key: value
             for key, value in benchmark_results.items()
             if key in calculate_metrics_params
         }
+        # Filter out certain parameters from benchmark_param, eg. "num_runs".
         benchmark_params_to_filter = ["num_runs", "trace_dir"]
         filtered_benchmark_param = {
             key: value
@@ -251,73 +273,162 @@ def run_single_benchmark(benchmark_config: Dict[str, Any], common_metrics_dir: s
         metadata, metrics = calculate_metrics_func(
             **filtered_benchmark_param, **filtered_benchmark_results
         )
-
-        maybe_write_metrics_file(
-            common_metrics_dir,
-            metrics,
-            metadata,
-            benchmark_name,
-            test_start_time,
-            test_end_time,
-        )
+        calculate_metrics_results.append({"metadata": metadata, "metrics": metrics})
+        if xlml_metrics_dir:
+            maybe_write_metrics_file(
+                xlml_metrics_dir,
+                metrics,
+                metadata,
+                benchmark_name,
+                test_start_time,
+                test_end_time,
+            )
+        # Post process the xla dump
         if xla_dump_dir:
             rename_xla_dump(
                 tmp_xla_dump_dir=TMP_XLA_DUMP_DIR,
-                dest_xla_dump_dir=os.path.join(LOCAL_METRICS_OUTPUT_DIR, xla_dump_dir), # Save dumps within the main output dir
+                dest_xla_dump_dir=xla_dump_dir,
                 benchmark_name=benchmark_name,
                 benchmark_param=original_benchmark_param,
             )
 
-    # Note: CSV writing is not per benchmark run in this structure, but per benchmark_config
-    # This seems to be an existing design.
+    # Dump metrics to file.
+    if csv_path:
+        test_name = f"t_{benchmark_name}_" + "".join(
+            random.choices(string.ascii_uppercase + string.digits, k=10)
+        )
+        write_to_csv(f"{csv_path}/{test_name}.csv", calculate_metrics_results)
+
 
 def main(config_path: str, multithreaded: bool, generate_report: bool):
     """Main function."""
+    # Load configuration
     config = get_benchmark_config(config_path)
     benchmarks = config.get("benchmarks")
     if not benchmarks or not isinstance(benchmarks, list):
         raise ValueError("Configuration must contain a 'benchmarks' list.")
 
-    # Setup local metrics directory
-    os.makedirs(LOCAL_METRICS_OUTPUT_DIR, exist_ok=True)
-    if os.path.exists(METRICS_REPORT_FILE):
-        os.remove(METRICS_REPORT_FILE)
-    if os.path.exists(EXCEL_REPORT_FILE):
-        os.remove(EXCEL_REPORT_FILE)
-
-    os.makedirs(TMP_XLA_DUMP_DIR, exist_ok=True)
-    for filename in os.listdir(TMP_XLA_DUMP_DIR):
-        file_path = os.path.join(TMP_XLA_DUMP_DIR, filename)
-        if os.path.isfile(file_path):
-            os.remove(file_path)
+    # Clear the tmp dirs.
+    if os.path.exists(TMP_XLA_DUMP_DIR):
+        for filename in os.listdir(TMP_XLA_DUMP_DIR):
+            file_path = os.path.join(TMP_XLA_DUMP_DIR, filename)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
 
     if multithreaded:
-         # Placeholder for Ray initialization if needed
-        print("Multithreaded mode with Ray not fully implemented in this example")
-        # ray.init(address="ray://tpu-ray-cluster-head-svc:10001")
-        # print(ray.available_resources())
-        # for benchmark_config in benchmarks:
-        #     run_benchmark_multithreaded(benchmark_config, LOCAL_METRICS_OUTPUT_DIR)
+        ray.init(
+            runtime_env=ray.runtime_env.RuntimeEnv(
+                address="ray://tpu-ray-cluster-head-svc:10001",
+                env_vars={
+                    "XLA_IR_DEBUG": "1",
+                    "XLA_HLO_DEBUG": "1",
+                    "PJRT_DEVICE": "TPU",
+                    # "LIBTPU_INIT_ARGS": "--xla_tpu_scoped_vmem_limit_kib=25602",
+                },
+            )
+        )
+
+        # Calculate the number of TPU hosts within our Ray cluster...
+        # num_hosts = int(ray.available_resources()["TPU"]) // 4
+        print(ray.available_resources())
+        # print("Num hosts detected: %d", num_hosts)
+
+        for benchmark_config in benchmarks:
+            run_benchmark_multithreaded(benchmark_config)
+
     else:
         for benchmark_config in benchmarks:
-            run_single_benchmark(benchmark_config, LOCAL_METRICS_OUTPUT_DIR)
+            run_single_benchmark(benchmark_config)
 
-    if generate_report:
-        print("Starting report generation...")
-        try:
-            report_generator.generate_local_excel_report(METRICS_REPORT_FILE, EXCEL_REPORT_FILE)
-            print(f"Report generation complete. Saved to {EXCEL_REPORT_FILE}")
-        except Exception as e:
-            print(f"Error during report generation: {e}", file=sys.stderr)
-    print(f"Benchmark outputs are in {LOCAL_METRICS_OUTPUT_DIR}")
+
+def run_benchmark_multithreaded(benchmark_config):
+    # Extract benchmark details
+    benchmark_name = benchmark_config.get("benchmark_name")
+    benchmark_params = benchmark_config.get("benchmark_params", [])
+    benchmark_sweep_params = benchmark_config.get("benchmark_sweep_params", {})
+    if benchmark_sweep_params:
+        benchmark_params += generate_benchmark_params_sweeping(benchmark_sweep_params)
+    csv_path = benchmark_config.get("csv_path")
+    if not benchmark_name:
+        raise ValueError("Each benchmark must have a 'benchmark_name'.")
+
+    # Get the benchmark function
+    benchmark_func, calculate_metrics_func = get_benchmark_functions(benchmark_name)
+
+    print(f"\n{'=' * 30}Starting benchmark '{benchmark_name}'{'=' * 30}\n")
+
+    # Start a trace if requested
+    test_name = f"t_{benchmark_name}_" + "".join(
+        random.choices(string.ascii_uppercase + string.digits, k=10)
+    )
+
+    # Preprocess benchmark parameters
+    preprocessed_benchmark_params = [
+        preprocess_benchmark_param(benchmark_param, trace_dir=None)
+        for benchmark_param in benchmark_params
+    ]
+    calculate_metrics_results = []
+
+    # Calculate the number of TPU hosts within our Ray cluster...
+    num_hosts = int(ray.available_resources()["TPU"]) // 4
+    # print(ray.available_resources())
+    print(f"Num hosts detected: {num_hosts}")
+
+    # Run benchmark_func in multiple threads
+    with ThreadPoolExecutor(max_workers=num_hosts) as executor:
+        # Create a mapping of futures to their corresponding parameters
+        future_to_param = {
+            executor.submit(benchmark_func, **benchmark_param): benchmark_param
+            for benchmark_param in preprocessed_benchmark_params
+        }
+
+        # Process each future as it completes
+        for future in future_to_param:
+            benchmark_param = future_to_param[
+                future
+            ]  # Retrieve the corresponding benchmark_param
+            benchmark_results = future.result()  # Get the result from the future
+
+            # Filter benchmark_results to include only keys present in calculate_metrics_func
+            calculate_metrics_params = inspect.signature(
+                calculate_metrics_func
+            ).parameters
+            filtered_benchmark_results = {
+                key: value
+                for key, value in benchmark_results.items()
+                if key in calculate_metrics_params
+            }
+
+            # Call calculate_metrics_func with the filtered results and benchmark_param
+            metadata, metrics = calculate_metrics_func(
+                **benchmark_param, **filtered_benchmark_results
+            )
+            calculate_metrics_results.append({"metadata": metadata, "metrics": metrics})
+
+    if csv_path:
+        write_to_csv(f"{csv_path}/{test_name}.csv", calculate_metrics_results)
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run microbenchmarks and collect metrics.")
-    parser.add_argument("--config", type=str, required=True, help="Path to the YAML configuration file.")
-    parser.add_argument("--multithreaded", action='store_true', help="Run benchmarks in multithreaded mode using Ray.")
-    parser.add_argument("--generate_report", action='store_true', help="Generate an Excel report locally.")
-
+    parser = argparse.ArgumentParser(
+        description="Run microbenchmarks and collect metrics."
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to the YAML configuration file.",
+    )
+    parser.add_argument(
+        "--multithreaded",
+        type=bool,
+        default=False,
+        help="Run benchmarks in multiple threads using Ray.",
+    )
+    parser.add_argument(
+        "--generate_report",
+        action="store_true",
+        help="Flag to indicate that a report should be generated. This script does not act on this flag directly.",
+    )
     args = parser.parse_args()
-    # Set XLA_FLAGS environment variable
-    os.environ["XLA_FLAGS"] = f"--xla_dump_to={TMP_XLA_DUMP_DIR}"
     main(args.config, args.multithreaded, args.generate_report)
