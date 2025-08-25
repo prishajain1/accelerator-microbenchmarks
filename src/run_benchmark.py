@@ -20,7 +20,13 @@ import ray
 from concurrent.futures import ThreadPoolExecutor
 import os
 import copy
+import sys # Added
 
+# !!! AVOID ALL OTHER CHANGES IN THIS SECTION - START !!!
+# ... (all existing code like COLLECTIVE_BENCHMARK_MAP, dtype_mapping, functions, etc.) ...
+# ... (get_benchmark_config, get_benchmark_functions, etc.) ...
+# ... (preprocess_benchmark_param, generate_benchmark_params_sweeping, etc.) ...
+# ... (write_to_csv, run_single_benchmark, etc.) ...
 
 COLLECTIVE_BENCHMARK_MAP = {
     "all_gather": "benchmark_collectives.all_gather_benchmark",
@@ -273,6 +279,8 @@ def run_single_benchmark(benchmark_config: Dict[str, Any]):
         metadata, metrics = calculate_metrics_func(
             **filtered_benchmark_param, **filtered_benchmark_results
         )
+        # Add benchmark_name to metadata
+        metadata["benchmark_name"] = benchmark_name
         calculate_metrics_results.append({"metadata": metadata, "metrics": metrics})
         if xlml_metrics_dir:
             maybe_write_metrics_file(
@@ -298,48 +306,6 @@ def run_single_benchmark(benchmark_config: Dict[str, Any]):
             random.choices(string.ascii_uppercase + string.digits, k=10)
         )
         write_to_csv(f"{csv_path}/{test_name}.csv", calculate_metrics_results)
-
-
-def main(config_path: str, multithreaded: bool, generate_report: bool):
-    """Main function."""
-    # Load configuration
-    config = get_benchmark_config(config_path)
-    benchmarks = config.get("benchmarks")
-    if not benchmarks or not isinstance(benchmarks, list):
-        raise ValueError("Configuration must contain a 'benchmarks' list.")
-
-    # Clear the tmp dirs.
-    if os.path.exists(TMP_XLA_DUMP_DIR):
-        for filename in os.listdir(TMP_XLA_DUMP_DIR):
-            file_path = os.path.join(TMP_XLA_DUMP_DIR, filename)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-
-    if multithreaded:
-        ray.init(
-            runtime_env=ray.runtime_env.RuntimeEnv(
-                address="ray://tpu-ray-cluster-head-svc:10001",
-                env_vars={
-                    "XLA_IR_DEBUG": "1",
-                    "XLA_HLO_DEBUG": "1",
-                    "PJRT_DEVICE": "TPU",
-                    # "LIBTPU_INIT_ARGS": "--xla_tpu_scoped_vmem_limit_kib=25602",
-                },
-            )
-        )
-
-        # Calculate the number of TPU hosts within our Ray cluster...
-        # num_hosts = int(ray.available_resources()["TPU"]) // 4
-        print(ray.available_resources())
-        # print("Num hosts detected: %d", num_hosts)
-
-        for benchmark_config in benchmarks:
-            run_benchmark_multithreaded(benchmark_config)
-
-    else:
-        for benchmark_config in benchmarks:
-            run_single_benchmark(benchmark_config)
-
 
 def run_benchmark_multithreaded(benchmark_config):
     # Extract benchmark details
@@ -403,11 +369,97 @@ def run_benchmark_multithreaded(benchmark_config):
             metadata, metrics = calculate_metrics_func(
                 **benchmark_param, **filtered_benchmark_results
             )
+             # Add benchmark_name to metadata
+            metadata["benchmark_name"] = benchmark_name
             calculate_metrics_results.append({"metadata": metadata, "metrics": metrics})
 
     if csv_path:
         write_to_csv(f"{csv_path}/{test_name}.csv", calculate_metrics_results)
 
+# !!! AVOID ALL OTHER CHANGES IN THIS SECTION - END !!!
+
+# Added for report generation
+try:
+    from report_generator import generate_excel_report
+except ImportError:
+    print("Warning: report_generator.py not found. XLSX report generation will be disabled.", file=sys.stderr)
+    generate_excel_report = None
+
+def main(config_path: str, multithreaded: bool, generate_report_flag: bool, tpu_type: str):
+    """Main function."""
+    # Load configuration
+    config = get_benchmark_config(config_path)
+    benchmarks = config.get("benchmarks")
+    if not benchmarks or not isinstance(benchmarks, list):
+        raise ValueError("Configuration must contain a 'benchmarks' list.")
+
+    # Clear the tmp dirs.
+    if os.path.exists(TMP_XLA_DUMP_DIR):
+        for filename in os.listdir(TMP_XLA_DUMP_DIR):
+            file_path = os.path.join(TMP_XLA_DUMP_DIR, filename)
+            if os.path.isfile(file_path):
+                os.remove(file_path)
+
+    xlml_metrics_dir = None
+    # Find xlml_metrics_dir from any benchmark config or top level
+    if config.get("xlml_metrics_dir"):
+         xlml_metrics_dir = config["xlml_metrics_dir"]
+    if not xlml_metrics_dir and benchmarks:
+        for benchmark_config in benchmarks:
+            if benchmark_config.get("xlml_metrics_dir"):
+                xlml_metrics_dir = benchmark_config.get("xlml_metrics_dir")
+                # Propagate to other configs if not set
+                for bc in benchmarks:
+                    if not bc.get("xlml_metrics_dir"):
+                         bc["xlml_metrics_dir"] = xlml_metrics_dir
+                break
+
+    jsonl_file_path = None
+    if xlml_metrics_dir:
+         os.makedirs(xlml_metrics_dir, exist_ok=True)
+         jsonl_file_path = os.path.join(xlml_metrics_dir, "metrics_report.jsonl")
+         # Clear existing JSONL file to ensure a fresh report for this run
+         if os.path.exists(jsonl_file_path):
+             os.remove(jsonl_file_path)
+    elif generate_report_flag:
+        print("Warning: xlml_metrics_dir not specified in config. Cannot generate report.", file=sys.stderr)
+        generate_report_flag = False
+
+    if multithreaded:
+        ray.init(
+            runtime_env=ray.runtime_env.RuntimeEnv(
+                address="ray://tpu-ray-cluster-head-svc:10001",
+                env_vars={
+                    "XLA_IR_DEBUG": "1",
+                    "XLA_HLO_DEBUG": "1",
+                    "PJRT_DEVICE": "TPU",
+                    # "LIBTPU_INIT_ARGS": "--xla_tpu_scoped_vmem_limit_kib=25602",
+                },
+            )
+        )
+
+        print(ray.available_resources())
+
+        for benchmark_config in benchmarks:
+            run_benchmark_multithreaded(benchmark_config)
+
+    else:
+        for benchmark_config in benchmarks:
+            run_single_benchmark(benchmark_config)
+
+    # Generate Excel report if flag is set
+    if generate_report_flag and jsonl_file_path:
+        xlsx_file_path = os.path.join(xlml_metrics_dir, "metrics_report.xlsx")
+        if not tpu_type:
+            print("Error: TPU_TYPE environment variable must be set to generate the report.", file=sys.stderr)
+        elif generate_excel_report is None:
+            print("Error: Report generation module not available.", file=sys.stderr)
+        else:
+            print(f"Generating report from {jsonl_file_path} to {xlsx_file_path}")
+            try:
+                generate_excel_report(jsonl_file_path, xlsx_file_path, tpu_type)
+            except Exception as e:
+                print(f"Error during report generation: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -423,12 +475,13 @@ if __name__ == "__main__":
         "--multithreaded",
         type=bool,
         default=False,
-        help="Run benchmarks in multiple threads using Ray.",
+        help="Run benchmarks in multithreaded mode using Ray.",
     )
     parser.add_argument(
         "--generate_report",
         action="store_true",
-        help="Flag to indicate that a report should be generated. This script does not act on this flag directly.",
+        help="Generate an XLSX report from the metrics.",
     )
     args = parser.parse_args()
-    main(args.config, args.multithreaded, args.generate_report)
+    tpu_type = os.getenv("TPU_TYPE")
+    main(args.config, args.multithreaded, args.generate_report, tpu_type)
