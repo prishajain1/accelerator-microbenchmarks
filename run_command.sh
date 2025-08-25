@@ -44,7 +44,8 @@ xpk workload create \
   --command="${COMMAND}" \
   --num-slices=${NUM_SLICES} \
   --docker-image=${DOCKER_IMAGE} \
-  --workload=${WORKLOAD_NAME}
+  --workload=${WORKLOAD_NAME} \
+  --env TPU_TYPE=${TPU_TYPE}
 
 # To delete the workload later:
 # xpk workload delete --cluster=${CLUSTER_NAME} --workload=${WORKLOAD_NAME}
