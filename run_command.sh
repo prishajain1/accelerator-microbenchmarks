@@ -31,13 +31,13 @@ COMMAND="git clone -b ${BRANCH_NAME} https://github.com/${GITHUB_USER}/accelerat
 cd accelerator-microbenchmarks && \
 pip install -r requirements.txt && \
 python src/run_benchmark.py --config=configs/xlml_v5p_256_utksharma.yaml --generate_report && \
-gsutil -m cp /tmp/microbenchmarks/outputs/metrics_report.jsonl ${GCS_PATH}
+gsutil -m cp /tmp/microbenchmarks/outputs/metrics_report.jsonl ${GCS_PATH}"
 
 
 xpk workload create \
   --cluster=${CLUSTER_NAME} \
   --device-type=${TPU_TYPE} \
-  --command="${COMMAND}" \
+  --command=${COMMAND} \
   --num-slices=${NUM_SLICES} \
   --docker-image=${DOCKER_IMAGE} \
   --workload=${WORKLOAD_NAME}
