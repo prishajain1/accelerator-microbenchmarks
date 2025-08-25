@@ -447,19 +447,43 @@ def main(config_path: str, multithreaded: bool, generate_report_flag: bool, tpu_
         for benchmark_config in benchmarks:
             run_single_benchmark(benchmark_config)
 
-    # Generate Excel report if flag is set
-    if generate_report_flag and jsonl_file_path:
-        xlsx_file_path = os.path.join(xlml_metrics_dir, "metrics_report.xlsx")
-        if not tpu_type:
-            print("Error: TPU_TYPE environment variable must be set to generate the report.", file=sys.stderr)
-        elif generate_excel_report is None:
-            print("Error: Report generation module not available.", file=sys.stderr)
-        else:
-            print(f"Generating report from {jsonl_file_path} to {xlsx_file_path}")
+    # ... inside main()
+if generate_report_flag and jsonl_file_path:
+    print(f"DEBUG: run_benchmark - About to call generate_excel_report.")
+    print(f"DEBUG: run_benchmark - Checking file: {jsonl_file_path}")
+    if os.path.exists(jsonl_file_path):
+        file_size = os.path.getsize(jsonl_file_path)
+        print(f"DEBUG: run_benchmark - {jsonl_file_path} EXISTS. Size: {file_size}")
+        if file_size > 0:
             try:
-                generate_excel_report(jsonl_file_path, xlsx_file_path, tpu_type)
+                with open(jsonl_file_path, 'r') as f:
+                    print(f"DEBUG: run_benchmark - First 100 chars: {f.read(100)}")
             except Exception as e:
-                print(f"Error during report generation: {e}", file=sys.stderr)
+                print(f"DEBUG: run_benchmark - Error reading file: {e}", file=sys.stderr)
+        else:
+            print(f"DEBUG: run_benchmark - WARNING: {jsonl_file_path} is empty.")
+    else:
+        print(f"DEBUG: run_benchmark - {jsonl_file_path} DOES NOT EXIST right before call.")
+
+    xlsx_file_path = os.path.join(xlml_metrics_dir, "metrics_report.xlsx")
+    if not tpu_type:
+        print("Error: TPU_TYPE environment variable must be set to generate the report.", file=sys.stderr)
+    elif generate_excel_report is None:
+        print("Error: Report generation module not available.", file=sys.stderr)
+    else:
+        print(f"DEBUG: run_benchmark - Calling generate_excel_report with jsonl='{jsonl_file_path}', xlsx='{xlsx_file_path}'")
+        try:
+            generate_excel_report(jsonl_file_path, xlsx_file_path, tpu_type)
+            print(f"DEBUG: run_benchmark - generate_excel_report call finished.")
+            if os.path.exists(xlsx_file_path):
+                 print(f"DEBUG: run_benchmark - XLSX file created: {xlsx_file_path}, Size: {os.path.getsize(xlsx_file_path)}")
+            else:
+                 print(f"DEBUG: run_benchmark - XLSX file NOT found after call: {xlsx_file_path}")
+        except Exception as e:
+            print(f"Error during report generation: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(

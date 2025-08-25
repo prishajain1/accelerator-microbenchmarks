@@ -19,6 +19,30 @@ def get_num_chips(tpu_type):
     raise ValueError(f"Could not extract number of chips from TPU_TYPE: {tpu_type}")
 
 def generate_excel_report(jsonl_path, xlsx_path, tpu_type):
+    print(f"[Report Generator] DEBUG: Inside generate_excel_report.")
+    print(f"[Report Generator] DEBUG: jsonl_path='{jsonl_path}', xlsx_path='{xlsx_path}'")
+
+    # Explicitly list directory contents
+    try:
+        metrics_dir = os.path.dirname(jsonl_path)
+        print(f"[Report Generator] DEBUG: Listing contents of '{metrics_dir}':")
+        items = os.listdir(metrics_dir)
+        for item in items:
+            print(f"[Report Generator] DEBUG:   - {item}")
+        if os.path.basename(jsonl_path) not in items:
+             print(f"[Report Generator] DEBUG: {os.path.basename(jsonl_path)} not in os.listdir() output.")
+    except Exception as e:
+        print(f"[Report Generator] DEBUG: Error listing dir '{metrics_dir}': {e}", file=sys.stderr)
+
+    print(f"[Report Generator] DEBUG: Checking existence of '{jsonl_path}' using os.path.exists()")
+    if not os.path.exists(jsonl_path):
+        print(f"[Report Generator] Error: Metrics file not found at {jsonl_path}", file=sys.stderr)
+        return
+    else:
+        file_size = os.path.getsize(jsonl_path)
+        print(f"[Report Generator] DEBUG: {jsonl_path} EXISTS. Size: {file_size}")
+    # ... rest of the function
+
     """
     Generates an Excel report from the benchmark metrics JSONL file.
 
