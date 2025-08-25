@@ -9,7 +9,7 @@ export NUM_SLICES=1
 
 # TODO change it
 # This is the name of the workload that will be created in the xpk command.
-export WORKLOAD_NAME="utksharma-tpu-mb-v5p-128"
+export WORKLOAD_NAME="prisha-tpu-mb-v5p-128"
 
 gcloud config set project ${PROJECT_ID}
 gcloud config set compute/zone ${ZONE}
@@ -30,4 +30,4 @@ xpk workload create \
   --workload=${WORKLOAD_NAME}
 
 # Wait for the workload to finish, then delete at the end.
-xpk workload delete --cluster=${CLUSTER_NAME} --workload=${WORKLOAD_NAME}
+# xpk workload delete --cluster=${CLUSTER_NAME} --workload=${WORKLOAD_NAME}
