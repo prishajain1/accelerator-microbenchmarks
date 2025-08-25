@@ -37,7 +37,7 @@ gsutil -m cp /tmp/microbenchmarks/outputs/metrics_report.jsonl ${GCS_PATH}"
 xpk workload create \
   --cluster=${CLUSTER_NAME} \
   --device-type=${TPU_TYPE} \
-  --command=${COMMAND} \
+  --command="${COMMAND}" \
   --num-slices=${NUM_SLICES} \
   --docker-image=${DOCKER_IMAGE} \
   --workload=${WORKLOAD_NAME}
