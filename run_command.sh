@@ -35,5 +35,5 @@ python src/run_benchmark.py \
 xpk workload create --cluster=${CLUSTER_NAME} --device-type=${TPU_TYPE} --command="${XPK_COMMAND}" --num-slices=1 --docker-image=${DOCKER_IMAGE} --workload=${WORKLOAD_NAME}
 
 # Delete the workload after it finishes
-xpk workload delete --cluster=${CLUSTER_NAME} --workload=${WORKLOAD_NAME}
+# xpk workload delete --cluster=${CLUSTER_NAME} --workload=${WORKLOAD_NAME}
 
