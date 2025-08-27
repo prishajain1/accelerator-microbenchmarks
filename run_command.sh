@@ -1,3 +1,4 @@
+set -e
 export CLUSTER_NAME="bodaborg-v6e-256-lcscld-c"
 export REGION="southamerica-west1"
 export ZONE="southamerica-west1-a"
@@ -15,6 +16,7 @@ export GCS_BASE_PATH="gs://${GCS_BUCKET}"
 export GCS_REPORT_PATH="${GCS_BASE_PATH}/report_data_${RUN_ID}"
 # Updated HLO dump path to be inside the run's report_data folder
 export GCS_HLO_DUMP_PATH="${GCS_REPORT_PATH}/hlo_dumps"
+export LOCAL_HLO_DUMP_PATH="/tmp/hlo_dumps_${RUN_ID}"
 
 export WORKLOAD_NAME="prishajain-mb-${TPU_TYPE}"
 
@@ -25,16 +27,28 @@ gcloud container clusters get-credentials ${CLUSTER_NAME} --region ${REGION} --p
 GCS_JSONL_PATH="${GCS_REPORT_PATH}/metrics_report.jsonl"
 GCS_EXCEL_PATH="${GCS_REPORT_PATH}/${TPU_TYPE}_benchmark_report.xlsx"
 
-XPK_COMMAND="git clone -b v6e https://github.com/prishajain1/accelerator-microbenchmarks.git && \
+XPK_COMMAND="set -ex && \
+echo '--- XPK Start ---' && \
+mkdir -p ${LOCAL_HLO_DUMP_PATH} && \
+git clone -b v6e https://github.com/prishajain1/accelerator-microbenchmarks.git && \
 cd accelerator-microbenchmarks && \
 pip install -r requirements.txt && \
-export XLA_FLAGS=\"--xla_dump_to=${GCS_HLO_DUMP_PATH} --xla_dump_hlo_as_text\" && \
+export XLA_FLAGS='--xla_dump_to=${GCS_HLO_DUMP_PATH} --xla_dump_hlo_as_text --xla_dump_hlo_passes --xla_backend_optimization_level=0' && \
+# export XLA_FLAGS='--xla_dump_to=${LOCAL_HLO_DUMP_PATH} --xla_dump_hlo_as_text --xla_dump_hlo_passes --xla_backend_optimization_level=0' && \
+echo "VERIFY: XLA_FLAGS in pod is ${XLA_FLAGS}" && \
+echo '--- Running jax check ---' && \
+python -c 'import jax; print(f\"JAX process: {jax.process_index()}/{jax.process_count()}, devices: {jax.devices()}\")' && \
+echo '--- Running benchmark ---' && \
 python src/run_benchmark.py \
   --config ${REPO_CONFIG_FILE} \
   --generate_report \
   --gcs_jsonl_path='${GCS_JSONL_PATH}' \
   --tpu_type=\"${TPU_TYPE}\" \
-  --gcs_excel_path=\"${GCS_EXCEL_PATH}\""
+  --gcs_excel_path=\"${GCS_EXCEL_PATH}\" && \
+echo '--- Benchmark End ---' && \
+echo '--- Listing local HLO dumps ---' && \
+ls -lR ${LOCAL_HLO_DUMP_PATH} && \
+echo '--- XPK End ---'"
 
 xpk workload create --cluster=${CLUSTER_NAME} --zone=${ZONE} --project=${PROJECT_ID} \
   --device-type=${TPU_TYPE} \
