@@ -8,7 +8,7 @@ export TPU_TYPE="v6e-256"
 # Config file path within the git repository
 export REPO_CONFIG_FILE="configs/xlml_v6e_256.yaml"
 
-export GCS_BUCKET="v5p-microbenchmarks"
+export GCS_BUCKET="v6e-microbenchmarks"
 export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
 export GCS_BASE_PATH="gs://${GCS_BUCKET}"
 # Base path for this specific run's reports
@@ -29,6 +29,7 @@ XPK_COMMAND="set -e && \
 git clone -b v6e https://github.com/prishajain1/accelerator-microbenchmarks.git && \
 cd accelerator-microbenchmarks && \
 pip install -r requirements.txt && \
+export XLA_FLAGS='--xla_dump_to=${GCS_HLO_DUMP_PATH} --xla_dump_hlo_as_text' && \
 python src/run_benchmark.py \
   --config ${REPO_CONFIG_FILE} \
   --generate_report \
