@@ -23,7 +23,7 @@ WORKLOAD_NAME="prisha-mb-${TPU_TYPE}"
 
 GCS_JSONL_PATH="${GCS_PATH}/${TPU_TYPE}/metrics_report.jsonl"
 GCS_EXCEL_PATH="${GCS_PATH}/${TPU_TYPE}_benchmark_report.xlsx"
-XPK_COMMAND="git clone -b testing https://github.com/prishajain1/accelerator-microbenchmarks.git && \
+XPK_COMMAND="git clone -b testing_changes https://github.com/prishajain1/accelerator-microbenchmarks.git && \
 cd accelerator-microbenchmarks && \
 pip install -r requirements.txt && \
 python src/run_benchmark.py \
