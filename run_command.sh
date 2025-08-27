@@ -6,7 +6,7 @@ export DOCKER_IMAGE="us-docker.pkg.dev/cloud-tpu-images/jax-stable-stack/tpu:jax
 export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
 
 # Change as per need (v5p-128/v5p-256)
-export TPU_TYPE=v5p-128
+export TPU_TYPE=v5p-256
 export GCS_BASE_PATH="gs://v5p-microbenchmarks"
 export GCS_PATH="${GCS_BASE_PATH}/report_data_${RUN_ID}"
 
@@ -16,10 +16,10 @@ gcloud config set compute/zone ${ZONE}
 gcloud container clusters get-credentials ${CLUSTER_NAME} --region ${REGION} --project ${PROJECT_ID}
 
 # Benchmark variables
-CONFIG_FILE="configs/xlml_v5p_128_utksharma.yaml"
+CONFIG_FILE="configs/xlml_v5p_256_utksharma.yaml"
 
 # TODO: change workload name
-WORKLOAD_NAME="prisha-mb-${TPU_TYPE}"
+WORKLOAD_NAME="prisha-mb-${TPU_TYPE}-c"
 
 GCS_JSONL_PATH="${GCS_PATH}/${TPU_TYPE}/metrics_report.jsonl"
 GCS_EXCEL_PATH="${GCS_PATH}/${TPU_TYPE}_benchmark_report.xlsx"
