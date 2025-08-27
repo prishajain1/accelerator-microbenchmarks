@@ -28,7 +28,7 @@ GCS_EXCEL_PATH="${GCS_REPORT_PATH}/${TPU_TYPE}_benchmark_report.xlsx"
 XPK_COMMAND="git clone -b v6e https://github.com/prishajain1/accelerator-microbenchmarks.git && \
 cd accelerator-microbenchmarks && \
 pip install -r requirements.txt && \
-export XLA_FLAGS='--xla_dump_to=${GCS_HLO_DUMP_PATH} --xla_dump_hlo_as_text' && \
+export XLA_FLAGS=\"--xla_dump_to=${GCS_HLO_DUMP_PATH} --xla_dump_hlo_as_text\" && \
 python src/run_benchmark.py \
   --config ${REPO_CONFIG_FILE} \
   --generate_report \
